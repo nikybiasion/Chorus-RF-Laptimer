@@ -1,8 +1,16 @@
 apply plugin: 'com.android.application'
 
 android {
+    signingConfigs {
+        config {
+            keyAlias 'key0'
+            keyPassword '123456'
+            storeFile file('/root/firmaperapk.jks')
+            storePassword '123456'
+        }
+    }
     compileSdkVersion 25
-    buildToolsVersion '26.0.2'
+    buildToolsVersion '25.0.2'
     defaultConfig {
         applicationId "app.andrey_voroshkov.chorus_laptimer"
         minSdkVersion 16
@@ -16,6 +24,10 @@ android {
         release {
             minifyEnabled true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.config
+        }
+        debug {
+            signingConfig signingConfigs.config
         }
     }
     productFlavors {
