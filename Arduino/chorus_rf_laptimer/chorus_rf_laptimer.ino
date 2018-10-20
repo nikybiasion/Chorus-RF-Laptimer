@@ -101,6 +101,7 @@ const uint16_t musicNotes[] PROGMEM = { 523, 587, 659, 698, 784, 880, 988, 1046 
 #define CONTROL_MIN_LAP_TIME        'M'
 #define CONTROL_SOUND               'S'
 #define CONTROL_THRESHOLD           'T'
+#define CONTROL_CALIBRATION_SETUP         'Z'
 // get only:
 #define CONTROL_GET_API_VERSION     '#'
 #define CONTROL_GET_ALL_DATA        'a'
@@ -108,6 +109,8 @@ const uint16_t musicNotes[] PROGMEM = { 523, 587, 659, 698, 784, 880, 988, 1046 
 #define CONTROL_GET_TIME            't'
 #define CONTROL_GET_VOLTAGE         'v'
 #define CONTROL_GET_IS_CONFIGURED   'y'
+#define CONTROL_GET_CALIBRATED_RSSI_LOW 'l'
+#define CONTROL_GET_CALIBRATED_RSSI_HIGH 'h'
 
 // output id byte constants
 #define RESPONSE_WAIT_FIRST_LAP      '1'
@@ -122,6 +125,9 @@ const uint16_t musicNotes[] PROGMEM = { 523, 587, 659, 698, 784, 880, 988, 1046 
 #define RESPONSE_MIN_LAP_TIME        'M'
 #define RESPONSE_SOUND               'S'
 #define RESPONSE_THRESHOLD           'T'
+#define RESPONSE_CALIBRATION_SETUP   'Z'
+#define RESPONSE_CALIBRATED_RSSI_LOW     'W'
+#define RESPONSE_CALIBRATED_RSSI_HIGH     'G'
 
 #define RESPONSE_API_VERSION         '#'
 #define RESPONSE_RSSI                'r'
@@ -149,6 +155,9 @@ const uint16_t musicNotes[] PROGMEM = { 523, 587, 659, 698, 784, 880, 988, 1046 
 #define SEND_VOLTAGE            13
 #define SEND_THRESHOLD_SETUP_MODE 14
 #define SEND_END_SEQUENCE       15
+#define SEND_CALIBRATION_SETUP_MODE 16
+#define SEND_CALIBRATED_RSSI_LOW   17
+#define SEND_CALIBRATED_RSSI_HIGH   18
 // following items don't participate in "send all items" response
 #define SEND_LAST_LAPTIMES          100
 #define SEND_TIME                   101
@@ -157,7 +166,7 @@ const uint16_t musicNotes[] PROGMEM = { 523, 587, 659, 698, 784, 880, 988, 1046 
 #define SEND_ALL_DEVICE_STATE       255
 
 //----- RSSI --------------------------------------
-#define FILTER_ITERATIONS 0 // software filtering iterations; set 0 - if filtered in hardware; set 5 - if not
+#define FILTER_ITERATIONS 5 // software filtering iterations; set 0 - if filtered in hardware; set 5 - if not
 uint16_t rssiArr[FILTER_ITERATIONS + 1];
 uint16_t rssiThreshold = 190;
 uint16_t rssi;
@@ -175,6 +184,14 @@ uint32_t lastRssiMonitorReading = 0; // millis when rssi monitor value was last 
 
 #define RSSI_SETUP_INITIALIZE 0
 #define RSSI_SETUP_NEXT_STEP 1
+
+#define RSSI_CALIBRATION_INITIALIZE 0
+#define RSSI_CALIBRATION_NEXT_STEP 1
+
+uint16_t calibratedRssiLow = 150;
+uint16_t calibratedRssiHigh = 150;
+uint8_t isCalibrated = 0;
+
 
 //----- Voltage monitoring -------------------------
 #define VOLTAGE_READS 3 //get average of VOLTAGE_READS readings
@@ -228,6 +245,7 @@ uint8_t lastLapsNotSent = 0;
 uint8_t thresholdSetupMode = 0;
 uint16_t frequency = 0;
 uint32_t millisUponRequest = 0;
+uint8_t calibrationSetupMode = 0;
 
 //----- read/write bufs ---------------------------
 #define READ_BUFFER_SIZE 20
@@ -435,6 +453,22 @@ void loop() {
                     onItemSent();
                 }
                 break;
+            case 16: // SEND_CALIBRATION_SETUP_MODE
+                if (send4BitsToSerial(RESPONSE_CALIBRATION_SETUP, calibrationSetupMode)) {
+                    onItemSent();
+                }
+                break;
+            case 17: // SEND_THRESHOLD
+                if (sendIntToSerial(RESPONSE_CALIBRATED_RSSI_LOW, calibratedRssiLow)) {
+                    onItemSent();
+                }
+                break;
+            case 18: // SEND_THRESHOLD
+                if (sendIntToSerial(RESPONSE_CALIBRATED_RSSI_HIGH, calibratedRssiHigh)) {
+                    onItemSent();
+                }
+                break;
+                                      
             // Below is a termination case, to notify that data for CONTROL_GET_ALL_DATA is over.
             // Must be the last item in the sequence!
             case 15: // SEND_END_SEQUENCE
@@ -498,6 +532,10 @@ void loop() {
 
     if (thresholdSetupMode) {
         setupThreshold(RSSI_SETUP_NEXT_STEP);
+    }
+
+    if (calibrationSetupMode) {
+        calibrateRSSI(RSSI_CALIBRATION_NEXT_STEP);
     }
 
     if (isSoundEnabled && playSound) {
@@ -663,6 +701,19 @@ void handleSerialControlInput(uint8_t *controlData, uint8_t length) {
                 }
                 addToSendQueue(SEND_THRESHOLD_SETUP_MODE);
                 break;
+            case CONTROL_CALIBRATION_SETUP: // setup threshold using sophisticated algorithm
+                valueToSet = TO_BYTE(controlData[1]);
+                calibrationSetupMode = valueToSet;
+                if (raceMode) { // don't run threshold setup in race mode because we don't calculate slowRssi in race mode, but it's needed for setup threshold algorithm
+                    calibrationSetupMode = 0;
+                }
+                if (calibrationSetupMode) {
+                    calibrateRSSI(RSSI_CALIBRATION_INITIALIZE);
+                } else {
+                    playThresholdSetupStopTones();
+                }
+                addToSendQueue(SEND_CALIBRATION_SETUP_MODE);
+                break;
         }
     } else { // get value and other instructions
         switch (controlByte) {
@@ -717,6 +768,15 @@ void handleSerialControlInput(uint8_t *controlData, uint8_t length) {
                 break;
             case CONTROL_GET_IS_CONFIGURED:
                 addToSendQueue(SEND_IS_CONFIGURED);
+                break;
+            case CONTROL_CALIBRATION_SETUP: // get state of threshold setup process
+                addToSendQueue(SEND_CALIBRATION_SETUP_MODE);
+                break;
+            case CONTROL_GET_CALIBRATED_RSSI_LOW:
+                addToSendQueue(SEND_CALIBRATED_RSSI_LOW);
+                break;
+            case CONTROL_GET_CALIBRATED_RSSI_HIGH:
+                addToSendQueue(SEND_CALIBRATED_RSSI_HIGH);
                 break;
         }
     }
@@ -918,6 +978,17 @@ void setupThreshold(uint8_t phase) {
             uint16_t rssiLowEnoughForSetup = rssiHigh - (rssiHigh - rssiLow) * FALL_RSSI_THRESHOLD_PERCENT / 100;
             if (accumulatedRssi < rssiLowEnoughForSetup) {
                 rssiThreshold = rssiHigh - ((rssiHigh - rssiLow) * TOP_RSSI_DECREASE_PERCENT) / 100;
+                rssiThreshold = constrain(
+                    map(
+                        rssiThreshold,
+                        calibratedRssiLow,
+                        calibratedRssiHigh,
+                        0,
+                        100
+                    ),
+                    0,
+                    100
+                    );
                 thresholdSetupMode = 0;
                 isConfigured = 1;
                 playThresholdSetupDoneTones();
@@ -950,6 +1021,7 @@ uint16_t setRssiMonitorInterval(uint16_t interval) {
 // ----------------------------------------------------------------------------
 uint16_t getFilteredRSSI() {
     rssiArr[0] = readRSSI();
+    
 
     // several-pass filter (need several passes because of integer artithmetics)
     // it reduces possible max value by 1 with each iteration.
@@ -958,7 +1030,23 @@ uint16_t getFilteredRSSI() {
         rssiArr[i] = (rssiArr[i-1] + rssiArr[i]) >> 1;
     }
 
-    return rssiArr[FILTER_ITERATIONS];
+    if (isCalibrated){
+        uint16_t  rssiC = constrain(
+                map(
+                    rssiArr[FILTER_ITERATIONS],
+                    calibratedRssiLow,
+                    calibratedRssiHigh,
+                    1,
+                    130
+                ),
+                1,
+                130
+            );
+        return rssiC;
+    }
+    else
+        return rssiArr[FILTER_ITERATIONS];
+
 }
 // ----------------------------------------------------------------------------
 // this is just a digital filter function
@@ -1000,6 +1088,7 @@ uint16_t readRSSI() {
     }
 
     rssiA = rssiA/RSSI_READS; // average of RSSI_READS readings
+
     return rssiA;
 }
 // ----------------------------------------------------------------------------
@@ -1012,4 +1101,68 @@ uint16_t readVoltage() {
 
     voltageA = voltageA/VOLTAGE_READS; // average of RSSI_READS readings
     return voltageA;
+}
+
+void calibrateRSSI(uint8_t phase) {
+    #define MILLIS_FOR_LOWRSSI 6000
+    #define MILLIS_FOR_HIGHRSSI 12000
+
+
+    static uint16_t rssiHighEnoughForMonitoring;
+    static uint32_t accumulatedShiftedRssi; // accumulates rssi slowly; contains multiplied rssi value for better accuracy
+    static uint32_t lastRssiAccumulationTime;
+    static uint32_t beginCalibrationTime;
+    static uint16_t rssiRaw;
+
+    if (!calibrationSetupMode) return; // just for safety, normally it's controlled outside
+
+    if (phase == RSSI_CALIBRATION_INITIALIZE) {
+        isCalibrated = 0;
+        // initialization step
+        //playThresholdSetupStartTones();
+        calibrationSetupMode = 1;
+        //calibratedRssiLow = 150; // using slowRssi to avoid catching random current rssi
+        //calibratedRssiHigh = calibratedRssiLow;
+        calibratedRssiLow = 150;
+        calibratedRssiHigh = 150;
+
+        beginCalibrationTime= millis();
+    } else {
+        // active phase step (searching for high value and fall down)
+        if (calibrationSetupMode == 1) {
+            // in this phase of the setup we are tracking rssi growth until it reaches the predefined percentage from low
+            rssiRaw = getFilteredRSSI();
+            // searching for peak; using slowRssi to avoid catching sudden random peaks
+            if (rssiRaw < calibratedRssiLow) {
+                calibratedRssiLow = rssiRaw;
+            }
+
+            // since filter runs too fast, we have to introduce a delay between subsequent readings of filter values
+            uint32_t curTime = millis();
+
+            if ((curTime - beginCalibrationTime) > MILLIS_FOR_LOWRSSI) {
+                calibrationSetupMode = 2;
+                addToSendQueue(SEND_CALIBRATION_SETUP_MODE);
+                addToSendQueue(SEND_CALIBRATED_RSSI_LOW);
+            }
+        } else {
+            // in this phase of the setup we are tracking highest rssi and expect it to fall back down so that we know that the process is complete
+            rssiRaw = getFilteredRSSI();
+            // continue searching for peak; using slowRssi to avoid catching sudden random peaks
+            if (rssiRaw > calibratedRssiHigh) {
+                calibratedRssiHigh = rssiRaw;
+            }
+
+            // since filter runs too fast, we have to introduce a delay between subsequent readings of filter values
+            uint32_t curTime = millis();
+            if ((curTime - beginCalibrationTime) > MILLIS_FOR_HIGHRSSI) {
+                calibrationSetupMode = 0;
+                isCalibrated = 1;
+                isConfigured = 1;
+                playThresholdSetupDoneTones();
+                addToSendQueue(SEND_CALIBRATION_SETUP_MODE);
+                addToSendQueue(SEND_CALIBRATED_RSSI_HIGH);
+            }
+        }
+    }
 }
