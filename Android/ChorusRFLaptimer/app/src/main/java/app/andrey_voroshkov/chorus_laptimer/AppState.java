@@ -23,6 +23,7 @@ public class AppState {
     public static final int MIN_RSSI = 80;
     public static final int MAX_RSSI = 315;
     public static final int RSSI_SPAN = MAX_RSSI - MIN_RSSI;
+    public static final int RSSI_HISTORY_LENGTH = 30; // last 3 seconds * 10 readings per second
     public static final int CALIBRATION_TIME_MS = 10000;
     public static final String bandNames [] = {"R", "A", "B", "E", "F", "D", "Connex1", "Connex2"};
     public static final int DEFAULT_MIN_LAP_TIME = 5;
@@ -152,7 +153,7 @@ public class AppState {
         int count = deviceStates.size();
         if (count < numberOfDevices) {
             for(int i = count; i < numberOfDevices; i++) {
-                DeviceState ds = new DeviceState();
+                DeviceState ds = new DeviceState(RSSI_HISTORY_LENGTH);
                 ds.threshold = 0;
                 ds.channel = i%8;
                 ds.pilotName = "Pilot " + Integer.toString(i+1);
@@ -586,8 +587,10 @@ public class AppState {
         }
         if (currentState.currentRSSI != rssi) {
             currentState.currentRSSI = rssi;
-            emitEvent(DataAction.DeviceRSSI);
+            //emitEvent(DataAction.DeviceRSSI);
         }
+        currentState.historicalRSSI.write(rssi);
+        emitEvent(DataAction.DeviceRSSI);
     }
 
     public void changeRaceMinLapTime(int minLapTime) {

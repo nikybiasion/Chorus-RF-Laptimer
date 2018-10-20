@@ -17,10 +17,12 @@ public class DeviceState {
     public long deviceTime;
     public int thresholdSetupState;
     public int apiVersion;
+    public RssiRingBuffer historicalRSSI;
 
-    DeviceState() {
+    DeviceState(int rssiBufferLength) {
         isCalibrated = false;
         isEnabled = true;
+        historicalRSSI = new RssiRingBuffer(rssiBufferLength);
     }
 }
 
